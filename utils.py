@@ -199,14 +199,18 @@ def generate_tactical_panel(df, options_data=None, info=None):
 
     # [V3.1] 结构化情绪探针：对比长短期限错配
     emotion_msg = f"📉短期PCR({pcr_short:.2f}) vs 📈中期PCR({pcr_mid:.2f})。 "
-    if pcr_short < 0.6 and pcr_mid > 1.0:
-        emotion_msg += "短期散户狂热看涨，中期资金却在防守，典型的【情绪诱多/反弹枯竭】，是执行高抛网格的绝佳时机。"
+    
+    # 阈值微调：放宽短期看涨判定(0.6->0.75)，捕捉更多潜在诱多信号
+    if pcr_short < 0.75 and pcr_mid > 1.0:
+        emotion_msg += "短期情绪偏向乐观，但中期资金在疯狂堆积空单防守，典型的【情绪诱多/反弹枯竭】，警惕主力高位出货。"
     elif pcr_short > 1.2 and pcr_mid < 0.8:
         emotion_msg += "短期市场恐慌抛售，中期资金暗中看涨，典型的【错杀挖坑】，适合在支撑位逢低吸纳。"
-    elif pcr_short < 0.6 and pcr_mid < 0.6:
+    elif pcr_short < 0.7 and pcr_mid < 0.7:
         emotion_msg += "长短资金一致狂热看涨，动能极强，但也需警惕『多头拥挤踩踏』风险。"
-    elif pcr_short > 1.2 and pcr_mid > 1.2:
+    elif pcr_short > 1.0 and pcr_mid > 1.0:
         emotion_msg += "长短资金一致看跌，悲观情绪蔓延，切勿盲目抄底接飞刀。"
+    elif pcr_mid > 2.0: # 新增：中期极度异常监控
+        emotion_msg += "⚠️注意：中期PCR出现极值，主力资金正在进行大规模对冲或避险，中期趋势存疑。"
     else:
         emotion_msg += "期权期限结构稳定，未见极端情绪背离噪音。"
         
