@@ -36,7 +36,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # 【V3醒目标记】
-st.title("📈 核心资产实战决策面板 [V3.0 宏观自适应版]")
+st.title("📈 核心资产实战决策面板 [V3.1 宏观自适应版]")
 st.markdown("系统内置**状态机路由**与**动态防守脚本**，抛弃机械打分，专为趋势跟踪与长线波段定制定向策略。")
 
 st.sidebar.header("用户输入")

@@ -120,23 +120,42 @@ def get_options_data(ticker):
         expirations = stock.options
         if not expirations: return None
         
-        # [V3] 智能期权侦测：寻找距离今天30天以上的期权，过滤末日轮噪音
-        target_date = expirations[0]
+        # [V3.1] 双引擎期权侦测：同时获取短期(末日轮)和中期(>30天)数据
+        short_date = expirations[0]
+        mid_date = expirations[0]
         today = datetime.now()
         for exp in expirations:
             exp_date = datetime.strptime(exp, '%Y-%m-%d')
             if (exp_date - today).days >= 30:
-                target_date = exp
+                mid_date = exp
                 break
                 
-        opt_chain = stock.option_chain(target_date)
-        calls, puts = opt_chain.calls, opt_chain.puts
-        total_call_vol = calls['volume'].sum() if not calls.empty else 0
-        total_put_vol = puts['volume'].sum() if not puts.empty else 0
-        pcr = total_put_vol / total_call_vol if total_call_vol > 0 else 0
-        top_calls = calls.sort_values(by='volume', ascending=False).head(5)[['contractSymbol', 'strike', 'lastPrice', 'volume', 'impliedVolatility']]
-        top_puts = puts.sort_values(by='volume', ascending=False).head(5)[['contractSymbol', 'strike', 'lastPrice', 'volume', 'impliedVolatility']]
-        return {'expiration_date': target_date, 'pcr': pcr, 'total_call_vol': total_call_vol, 'total_put_vol': total_put_vol, 'top_calls': top_calls, 'top_puts': top_puts}
+        # 抓取短期数据
+        short_chain = stock.option_chain(short_date)
+        short_call_vol = short_chain.calls['volume'].sum() if not short_chain.calls.empty else 0
+        short_put_vol = short_chain.puts['volume'].sum() if not short_chain.puts.empty else 0
+        pcr_short = short_put_vol / short_call_vol if short_call_vol > 0 else 0
+        
+        # 抓取中期数据
+        mid_chain = stock.option_chain(mid_date)
+        mid_call_vol = mid_chain.calls['volume'].sum() if not mid_chain.calls.empty else 0
+        mid_put_vol = mid_chain.puts['volume'].sum() if not mid_chain.puts.empty else 0
+        pcr_mid = mid_put_vol / mid_call_vol if mid_call_vol > 0 else 0
+
+        # 返回主要数据给前端展示（保留中期作为核心Top5展示，防噪音）
+        top_calls = mid_chain.calls.sort_values(by='volume', ascending=False).head(5)[['contractSymbol', 'strike', 'lastPrice', 'volume', 'impliedVolatility']]
+        top_puts = mid_chain.puts.sort_values(by='volume', ascending=False).head(5)[['contractSymbol', 'strike', 'lastPrice', 'volume', 'impliedVolatility']]
+        
+        return {
+            'expiration_date': mid_date,
+            'pcr': pcr_mid, # 兼容老代码
+            'pcr_short': pcr_short,
+            'pcr_mid': pcr_mid,
+            'total_call_vol': mid_call_vol,
+            'total_put_vol': mid_put_vol,
+            'top_calls': top_calls,
+            'top_puts': top_puts
+        }
     except Exception as e:
         print(f"Error fetching options data: {e}")
         return None
@@ -164,7 +183,10 @@ def generate_tactical_panel(df, options_data=None, info=None):
     sma20 = df['SMA_20'].iloc[-1] if 'SMA_20' in df.columns and not pd.isna(df['SMA_20'].iloc[-1]) else support_level
     sma50 = df['SMA_50'].iloc[-1] if 'SMA_50' in df.columns and not pd.isna(df['SMA_50'].iloc[-1]) else support_level
 
-    pcr = options_data.get('pcr', 1.0) if options_data else 1.0
+    # 提取长短双期权情绪
+    pcr_short = options_data.get('pcr_short', 1.0) if options_data else 1.0
+    pcr_mid = options_data.get('pcr_mid', 1.0) if options_data else 1.0
+    
     rsi = df['RSI'].iloc[-1] if 'RSI' in df.columns else 50
     volume_surge = df['Volume'].iloc[-1] > df['Volume'].rolling(20).mean().iloc[-1] * 1.5
 
@@ -175,13 +197,20 @@ def generate_tactical_panel(df, options_data=None, info=None):
         'actions': []
     }
 
-    # 情绪文案动态化
-    if pcr < 0.5:
-        tactical_data['emotion'] = f"[V3远期侦测] 中期PCR极低 ({pcr:.2f})，资金押注中期向上或对冲平仓。"
-    elif pcr > 1.2:
-        tactical_data['emotion'] = f"[V3远期侦测] 中期PCR偏高 ({pcr:.2f})，市场避险防守情绪较重。"
+    # [V3.1] 结构化情绪探针：对比长短期限错配
+    emotion_msg = f"📉短期PCR({pcr_short:.2f}) vs 📈中期PCR({pcr_mid:.2f})。 "
+    if pcr_short < 0.6 and pcr_mid > 1.0:
+        emotion_msg += "短期散户狂热看涨，中期资金却在防守，典型的【情绪诱多/反弹枯竭】，是执行高抛网格的绝佳时机。"
+    elif pcr_short > 1.2 and pcr_mid < 0.8:
+        emotion_msg += "短期市场恐慌抛售，中期资金暗中看涨，典型的【错杀挖坑】，适合在支撑位逢低吸纳。"
+    elif pcr_short < 0.6 and pcr_mid < 0.6:
+        emotion_msg += "长短资金一致狂热看涨，动能极强，但也需警惕『多头拥挤踩踏』风险。"
+    elif pcr_short > 1.2 and pcr_mid > 1.2:
+        emotion_msg += "长短资金一致看跌，悲观情绪蔓延，切勿盲目抄底接飞刀。"
     else:
-        tactical_data['emotion'] = f"[V3远期侦测] 中期PCR中性 ({pcr:.2f})，期权市场多空分歧不大。"
+        emotion_msg += "期权期限结构稳定，未见极端情绪背离噪音。"
+        
+    tactical_data['emotion'] = emotion_msg
 
     # 状态机路由与脚本生成
     if price_percentile <= 25:
@@ -189,7 +218,7 @@ def generate_tactical_panel(df, options_data=None, info=None):
         tactical_data['state_desc'] = "处于近一年的绝对底部区域。此时均线大概率处于滞后的死叉状态，趋势指标已失效。"
         tactical_data['actions'].append("🛡️ **绝对纪律：** 严禁在此位置恐慌性止损或割肉。")
         tactical_data['actions'].append("💡 **均线过滤：** 屏蔽 SMA/MACD 的空头信号，只看底部支撑。")
-        if pcr < 0.7 or rsi < 35:
+        if pcr_mid < 0.7 or rsi < 35:
             tactical_data['actions'].append("🔥 **异动提醒：** 情绪极度超卖或期权异动，随时爆发超跌反弹。")
             tactical_data['actions'].append(f"🕸️ **网格激活：** 逢高至 ${resistance_level:.2f} 抛出机动仓，回踩 ${support_level:.2f} 重新接回摊薄成本。")
         else:
@@ -214,8 +243,8 @@ def generate_tactical_panel(df, options_data=None, info=None):
         tactical_data['support'] = sma20 
         tactical_data['resistance'] = high_52w if current_price < high_52w else current_price * 1.05
         
-        if pcr < 0.4:
-             tactical_data['actions'].append(f"⚠️ **拥挤踩踏预警：** PCR极低({pcr:.2f})，提防多头拥挤导致的『利好出尽』短期回撤。")
+        if pcr_mid < 0.4:
+             tactical_data['actions'].append(f"⚠️ **拥挤踩踏预警：** PCR极低({pcr_mid:.2f})，提防多头拥挤导致的『利好出尽』短期回撤。")
              
         tactical_data['actions'].append(f"🛡️ **[V3]动态防守底线：** 收盘价若跌破20日均线(${sma20:.2f})减仓50%；跌破50日均线(${sma50:.2f})清仓。")
         tactical_data['actions'].append(f"🌊 **顺势跟踪：** 站稳均线之上切勿轻易猜顶，让利润奔跑，上沿阻力参考前高 ${tactical_data['resistance']:.2f}。")
