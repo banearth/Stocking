@@ -8,7 +8,8 @@ def get_stock_data(ticker, period="1y", interval="1d"):
     try:
         stock = yf.Ticker(ticker)
         df = stock.history(period=period, interval=interval)
-        if df.empty: return None, None
+        if df.empty:
+            return None, None
         df.index = df.index.tz_localize(None)
         info = stock.info
         return df, info
@@ -118,123 +119,163 @@ def get_options_data(ticker):
         stock = yf.Ticker(ticker)
         expirations = stock.options
         if not expirations: return None
-        nearest_date = expirations[0]
-        opt_chain = stock.option_chain(nearest_date)
+        
+        # [V3] 智能期权侦测：寻找距离今天30天以上的期权，过滤末日轮噪音
+        target_date = expirations[0]
+        today = datetime.now()
+        for exp in expirations:
+            exp_date = datetime.strptime(exp, '%Y-%m-%d')
+            if (exp_date - today).days >= 30:
+                target_date = exp
+                break
+                
+        opt_chain = stock.option_chain(target_date)
         calls, puts = opt_chain.calls, opt_chain.puts
         total_call_vol = calls['volume'].sum() if not calls.empty else 0
         total_put_vol = puts['volume'].sum() if not puts.empty else 0
         pcr = total_put_vol / total_call_vol if total_call_vol > 0 else 0
         top_calls = calls.sort_values(by='volume', ascending=False).head(5)[['contractSymbol', 'strike', 'lastPrice', 'volume', 'impliedVolatility']]
         top_puts = puts.sort_values(by='volume', ascending=False).head(5)[['contractSymbol', 'strike', 'lastPrice', 'volume', 'impliedVolatility']]
-        return {'expiration_date': nearest_date, 'pcr': pcr, 'total_call_vol': total_call_vol, 'total_put_vol': total_put_vol, 'top_calls': top_calls, 'top_puts': top_puts}
+        return {'expiration_date': target_date, 'pcr': pcr, 'total_call_vol': total_call_vol, 'total_put_vol': total_put_vol, 'top_calls': top_calls, 'top_puts': top_puts}
     except Exception as e:
         print(f"Error fetching options data: {e}")
         return None
 
 # ============== 核心重构：状态机战术引擎 ==============
 def generate_tactical_panel(df, options_data=None, info=None):
-    """
-    基于状态机的实战战术面板生成器。
-    摒弃传统的机械打分，直接输出当前状态和执行脚本。
-    """
     if df is None or df.empty: return None
 
     current_price = df['Close'].iloc[-1]
     
-    # 1. 计算边界探针 (支撑与压力) - 战术雷达缩圈（防暴跌失真）
-    # 放弃死板的30天，改为提取最近 8 个交易日（恰好覆盖 Unity 暴跌企稳后的近期真实多空博弈区）
+    # [V3] 修正API失真：直接从真实K线(近252个交易日/约1年)提取52周极值
+    df_1y = df.tail(252)
+    high_52w = df_1y['High'].max()
+    low_52w = df_1y['Low'].min()
+    
+    if high_52w == low_52w: high_52w += 0.01
+    price_percentile = ((current_price - low_52w) / (high_52w - low_52w)) * 100
+
+    # 战术雷达缩圈：最近8个交易日的微操边界 (兼容左侧和箱体)
     recent_tactical = df.tail(8)
     support_level = recent_tactical['Low'].min()
     resistance_level = recent_tactical['High'].max()
     
-    # 2. 计算大局观 (价格分位)
-    high_52w = info.get('fiftyTwoWeekHigh') if info else df['High'].max()
-    low_52w = info.get('fiftyTwoWeekLow') if info else df['Low'].min()
-    
-    # 防止除以0
-    if high_52w == low_52w: high_52w += 0.01
-    price_percentile = ((current_price - low_52w) / (high_52w - low_52w)) * 100
+    # 提取动态均线用于右侧防守
+    sma20 = df['SMA_20'].iloc[-1] if 'SMA_20' in df.columns and not pd.isna(df['SMA_20'].iloc[-1]) else support_level
+    sma50 = df['SMA_50'].iloc[-1] if 'SMA_50' in df.columns and not pd.isna(df['SMA_50'].iloc[-1]) else support_level
 
-    # 3. 提取情绪探针与动能
     pcr = options_data.get('pcr', 1.0) if options_data else 1.0
     rsi = df['RSI'].iloc[-1] if 'RSI' in df.columns else 50
     volume_surge = df['Volume'].iloc[-1] > df['Volume'].rolling(20).mean().iloc[-1] * 1.5
 
-    # 4. 状态机路由与脚本生成
     tactical_data = {
-        'support': support_level,
+        'support': support_level, 
         'resistance': resistance_level,
         'percentile': price_percentile,
         'actions': []
     }
 
-    # 情绪分析文案
-    if pcr < 0.6:
-        tactical_data['emotion'] = f"PCR极低 ({pcr:.2f})，期权资金强烈押注向上波动。"
+    # 情绪文案动态化
+    if pcr < 0.5:
+        tactical_data['emotion'] = f"[V3远期侦测] 中期PCR极低 ({pcr:.2f})，资金押注中期向上或对冲平仓。"
     elif pcr > 1.2:
-        tactical_data['emotion'] = f"PCR偏高 ({pcr:.2f})，市场避险情绪较重，注意防守。"
+        tactical_data['emotion'] = f"[V3远期侦测] 中期PCR偏高 ({pcr:.2f})，市场避险防守情绪较重。"
     else:
-        tactical_data['emotion'] = f"PCR中性 ({pcr:.2f})，期权市场无极端分歧。"
+        tactical_data['emotion'] = f"[V3远期侦测] 中期PCR中性 ({pcr:.2f})，期权市场多空分歧不大。"
 
-    # 根据状态机判定区间
+    # 状态机路由与脚本生成
     if price_percentile <= 25:
-        tactical_data['state_title'] = "深水区 (超跌左侧)"
-        tactical_data['state_desc'] = "股价处于一年内的绝对底部区域。此时均线大概率处于滞后的死叉状态，趋势指标已失效。"
-        
+        tactical_data['state_title'] = "深水区 (超跌左侧) [V3]"
+        tactical_data['state_desc'] = "处于近一年的绝对底部区域。此时均线大概率处于滞后的死叉状态，趋势指标已失效。"
         tactical_data['actions'].append("🛡️ **绝对纪律：** 严禁在此位置恐慌性止损或割肉。")
         tactical_data['actions'].append("💡 **均线过滤：** 屏蔽 SMA/MACD 的空头信号，只看底部支撑。")
-        
         if pcr < 0.7 or rsi < 35:
-            tactical_data['actions'].append("🔥 **异动提醒：** 情绪极度超卖/期权异动，随时可能爆发技术性超跌反弹。")
-            tactical_data['actions'].append(f"🕸️ **网格激活：** 逢高至 ${resistance_level:.2f} 附近抛出机动仓，回踩至 ${support_level:.2f} 附近重新接回，摊薄底仓成本。")
+            tactical_data['actions'].append("🔥 **异动提醒：** 情绪极度超卖或期权异动，随时爆发超跌反弹。")
+            tactical_data['actions'].append(f"🕸️ **网格激活：** 逢高至 ${resistance_level:.2f} 抛出机动仓，回踩 ${support_level:.2f} 重新接回摊薄成本。")
         else:
-            tactical_data['actions'].append("⏳ **耐心潜伏：** 右侧趋势未明，可利用极小仓位在支撑位附近试错，重仓需等待放量突破。")
+            tactical_data['actions'].append("⏳ **耐心潜伏：** 右侧未明，可利用极小仓位在支撑位附近试错。")
 
     elif 25 < price_percentile <= 75:
-        tactical_data['state_title'] = "箱体震荡区 (多空拉锯)"
-        tactical_data['state_desc'] = "股价脱离底部，进入横盘震荡蓄势阶段。此阶段追涨杀跌极易两头打脸。"
-        
+        tactical_data['state_title'] = "箱体震荡区 (多空拉锯) [V3]"
+        tactical_data['state_desc'] = "脱离底部，进入横盘震荡蓄势阶段。此阶段追涨杀跌极易两头打脸。"
         tactical_data['actions'].append(f"📏 **明确边界：** 当前运行在 ${support_level:.2f} - ${resistance_level:.2f} 箱体中。")
         tactical_data['actions'].append("🕸️ **网格战术：** 靠近下沿买入，靠近上沿卖出，赚取震荡差价。")
-        
         if current_price >= resistance_level * 0.95:
             if volume_surge:
-                tactical_data['actions'].append("🚀 **突破预警：** 股价逼近上沿且伴随爆量，若收盘有效站稳压力位，箱体打开，准备右侧追随！")
+                tactical_data['actions'].append("🚀 **突破预警：** 股价逼近上沿且伴随爆量，若有效站稳，准备右侧追随！")
             else:
                 tactical_data['actions'].append("⚠️ **遇阻预警：** 逼近上沿但量能不足，随时准备执行高抛。")
 
     else:
-        tactical_data['state_title'] = "高位趋势区 (右侧博弈)"
-        tactical_data['state_desc'] = "股价处于强势上升通道或历史高位。此时应顺势而为，趋势指标有效性极高。"
+        # [V3] 兼容 GLD 的右侧顺势逻辑，引入均线动态防守
+        tactical_data['state_title'] = "高位趋势区 (右侧博弈) [V3]"
+        tactical_data['state_desc'] = "处于强势上升通道或历史高位。网格高抛低吸失效，已切换为均线追踪防守策略。"
         
-        tactical_data['actions'].append("🛡️ **底仓保护：** 依托 20日/50日均线持有，均线不破不卖。")
-        if rsi > 70 and pcr < 0.6:
-            tactical_data['actions'].append("⚠️ **见顶预警：** RSI极度超买且期权狂热，谨防加速赶顶，考虑分批止盈防守。")
-        else:
-            tactical_data['actions'].append("🌊 **顺势跟踪：** 趋势良好，切勿轻易猜顶，让利润奔跑。")
+        tactical_data['support'] = sma20 
+        tactical_data['resistance'] = high_52w if current_price < high_52w else current_price * 1.05
+        
+        if pcr < 0.4:
+             tactical_data['actions'].append(f"⚠️ **拥挤踩踏预警：** PCR极低({pcr:.2f})，提防多头拥挤导致的『利好出尽』短期回撤。")
+             
+        tactical_data['actions'].append(f"🛡️ **[V3]动态防守底线：** 收盘价若跌破20日均线(${sma20:.2f})减仓50%；跌破50日均线(${sma50:.2f})清仓。")
+        tactical_data['actions'].append(f"🌊 **顺势跟踪：** 站稳均线之上切勿轻易猜顶，让利润奔跑，上沿阻力参考前高 ${tactical_data['resistance']:.2f}。")
 
     return tactical_data
 
 def generate_raw_data_report(df, info, options_data):
-    # 原逻辑保留，这部分不用修改
     report = []
-    report.append("=== 股票基本信息 ===")
+    report.append("=== 股票基本信息 [V3 引擎] ===")
     if info:
         report.append(f"代码: {info.get('symbol', 'N/A')}")
         report.append(f"名称: {info.get('shortName', 'N/A')}")
-        report.append(f"当前价格: {info.get('currentPrice', 'N/A')}")
+        report.append(f"当前价格: {df['Close'].iloc[-1]:.2f}")
         report.append(f"市值: {info.get('marketCap', 'N/A')}")
-        report.append(f"市盈率 (PE): {info.get('trailingPE', 'N/A')}")
-        report.append(f"52周最高: {info.get('fiftyTwoWeekHigh', 'N/A')}")
-        report.append(f"52周最低: {info.get('fiftyTwoWeekLow', 'N/A')}")
+        
+        # [V3] 自动识别 ETF 剔除无效 PE 数据
+        quote_type = info.get('quoteType', 'EQUITY')
+        if quote_type == 'ETF':
+            report.append("市盈率 (PE): N/A (该标的为 ETF，无有效 PE 指标)")
+        else:
+            report.append(f"市盈率 (PE): {info.get('trailingPE', 'N/A')}")
+            
+        report.append(f"52周最高(动态重算): {df.tail(252)['High'].max():.2f}")
+        report.append(f"52周最低(动态重算): {df.tail(252)['Low'].min():.2f}")
     else:
         report.append("无法获取基本信息")
-    report.append("\n=== 期权情绪数据 ===")
+    
+    report.append("\n=== 期权情绪数据 [V3 远期侦测] ===")
     if options_data:
-        report.append(f"到期日: {options_data['expiration_date']}")
+        report.append(f"到期日 (中期): {options_data['expiration_date']}")
         report.append(f"Put/Call Ratio (PCR): {options_data['pcr']:.4f}")
         report.append(f"看涨期权总成交量: {options_data['total_call_vol']}")
         report.append(f"看跌期权总成交量: {options_data['total_put_vol']}")
     else:
         report.append("无期权数据")
+    
+    report.append("\n=== 日线数据 (Daily - Recent 30 Days) ===")
+    symbol = info.get('symbol')
+    try:
+        stock = yf.Ticker(symbol) if symbol else None
+        if stock:
+            d_df = stock.history(period="3mo", interval="1d")
+            if not d_df.empty:
+                d_df = d_df.tail(30)[['Open', 'High', 'Low', 'Close', 'Volume']]
+                d_df.index = d_df.index.strftime('%Y-%m-%d')
+                report.append(d_df.to_csv(sep='\t'))
+            else:
+                report.append("无日线数据")
+            
+            report.append("\n=== 周线数据 (Weekly - Recent 30 Weeks) ===")
+            w_df = stock.history(period="1y", interval="1wk")
+            if not w_df.empty:
+                w_df = w_df.tail(30)[['Open', 'High', 'Low', 'Close', 'Volume']]
+                w_df.index = w_df.index.strftime('%Y-%m-%d')
+                report.append(w_df.to_csv(sep='\t'))
+            else:
+                report.append("无周线数据")
+        else:
+            report.append("无法获取K线数据")
+    except Exception as e:
+        report.append(f"数据获取失败: {e}")
+        
     return "\n".join(report)

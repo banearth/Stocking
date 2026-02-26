@@ -8,13 +8,26 @@ st.set_page_config(page_title="美股投资分析工具", layout="wide")
 st.markdown("""
 <style>
     .stMetric {
-        background-color: #262730;
-        border: 1px solid #464b5f;
-        padding: 10px;
-        border-radius: 5px;
+        background-color: #111827;
+        color: #f9fafb;
+        padding: 12px;
+        border-radius: 8px;
+        border: 1px solid #4b5563;
+    }
+    [data-testid="stMetricLabel"] {
+        color: #cbd5f5;
+    }
+    [data-testid="stMetricValue"] {
+        color: #f8fafc;
+        font-weight: 700;
+    }
+    [data-testid="stMetricDelta"] {
+        color: #a7f3d0;
     }
     .stDataFrame {
-        border: 1px solid #e0e0e0;
+        border: 1px solid #374151;
+        background-color: #111827;
+        color: #e5e7eb;
     }
     .tactical-box {
         padding: 20px; border-radius: 10px; background-color: #262730; color: white; margin-bottom: 20px;
@@ -22,11 +35,12 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📈 核心资产实战决策面板")
-st.markdown("系统内置**状态机路由**与**网格执行脚本**，抛弃机械打分，专为趋势跟踪与长线波段定制定向策略。")
+# 【V3醒目标记】
+st.title("📈 核心资产实战决策面板 [V3.0 宏观自适应版]")
+st.markdown("系统内置**状态机路由**与**动态防守脚本**，抛弃机械打分，专为趋势跟踪与长线波段定制定向策略。")
 
 st.sidebar.header("用户输入")
-ticker = st.sidebar.text_input("输入股票代码 (例如: AAPL, U, PDD)", "U").upper()
+ticker = st.sidebar.text_input("输入股票代码 (例如: AAPL, U, GLD)", "U").upper()
 period_map = {
     "1个月": "1mo", "3个月": "3mo", "6个月": "6mo", 
     "1年": "1y", "2年": "2y", "5年": "5y", "最大": "max"
@@ -49,11 +63,11 @@ if ticker:
         df = calculate_indicators(df)
         options_data = None 
         
-        with st.spinner("正在探知期权情绪底牌..."):
+        with st.spinner("正在探知期权情绪底牌 (V3远期侦测)..."):
              options_data = get_options_data(ticker)
 
         # ================= 改造后的战术面板 UI =================
-        st.subheader("🎯 实战战术面板")
+        st.subheader("🎯 实战战术面板 (V3 引擎驱动)")
         tactical_panel = generate_tactical_panel(df, options_data, info)
         
         if tactical_panel:
@@ -74,8 +88,8 @@ if ticker:
                 st.markdown(f"""
                 <div class="tactical-box" style="background-color: #064E3B;">
                     <h3 style="margin-top:0; color: #6EE7B7;">⚔️ 机器执行脚本</h3>
-                    <p><b>📈 向上阻力位 (网格高抛区)：</b> <span style="font-size: 1.2em; color: white;">${tactical_panel['resistance']:.2f}</span></p>
-                    <p><b>📉 向下支撑位 (网格低吸区)：</b> <span style="font-size: 1.2em; color: white;">${tactical_panel['support']:.2f}</span></p>
+                    <p><b>📈 向上阻力位：</b> <span style="font-size: 1.2em; color: white;">${tactical_panel['resistance']:.2f}</span></p>
+                    <p><b>📉 向下支撑位：</b> <span style="font-size: 1.2em; color: white;">${tactical_panel['support']:.2f}</span></p>
                     <hr style="border-color: #059669;">
                     <ul style="opacity: 0.9;">
                         {''.join([f'<li style="margin-bottom: 5px;">{act}</li>' for act in tactical_panel['actions']])}
@@ -97,8 +111,14 @@ if ticker:
         col1.metric("当前价格", f"${current_price:.2f}", f"{change:.2f} ({pct_change:.2f}%)")
         if info:
             col2.metric("总市值", f"${info.get('marketCap', 'N/A'):,}")
-            col3.metric("市盈率 (PE)", f"{info.get('trailingPE', 'N/A')}")
-            col4.metric("52周最高", f"${info.get('fiftyTwoWeekHigh', 'N/A')}")
+            # [V3] ETF 过滤显示
+            if info.get('quoteType', 'EQUITY') == 'ETF':
+                 col3.metric("市盈率 (PE)", "N/A (ETF)")
+            else:
+                 col3.metric("市盈率 (PE)", f"{info.get('trailingPE', 'N/A')}")
+            
+            # [V3] 动态重算 52周最高
+            col4.metric("52周最高(动态重算)", f"${df.tail(252)['High'].max():.2f}")
 
         # 下面的 Tabs UI 全完保留你的原始代码，没动
         tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📊 行情走势", "📈 技术指标详解", "🔮 趋势预测", "⚔️ 策略回测", "💰 期权分析", "📝 纯数据导出"])
@@ -143,50 +163,61 @@ if ticker:
             if future_df is not None:
                 trend_color = "green" if slope > 0 else "red"
                 fig_pred = go.Figure()
-                fig_pred.add_trace(go.Scatter(x=df.index, y=df['Close'], name='历史价格'))
+                fig_pred.add_trace(go.Scatter(x=df.index, y=df['Close'], name='历史价格', line=dict(color='gray', width=1)))
                 fig_pred.add_trace(go.Scatter(x=future_df.index, y=future_df['Predicted_Close'], name='预测趋势', line=dict(dash='dot', color='red', width=2)))
                 fig_pred.update_layout(title=f"预测斜率: {slope:.2f}", height=500, template="plotly_white", xaxis_rangeslider_visible=False)
                 st.plotly_chart(fig_pred, use_container_width=True)
 
         with tab4:
-            # 策略回测逻辑
-            st.subheader("⚔️ 策略回测")
-            strategy_options = {
-                'sma': '均线交叉 (Golden Cross)',
-                'rsi': 'RSI 超买超卖 (RSI Reversal)',
-                'macd': 'MACD 交叉 (MACD Crossover)',
-                'bollinger': '布林带突破 (Bollinger Breakout)'
+            strategies = {
+                'SMA金叉策略': 'sma',
+                'RSI均值回归': 'rsi',
+                'MACD趋势策略': 'macd',
+                '布林带突破': 'bollinger'
             }
-            selected_strategy = st.selectbox("选择回测策略", list(strategy_options.keys()), format_func=lambda x: strategy_options[x])
-            
-            signals = run_strategy(df, selected_strategy)
-            performance = calculate_strategy_performance(df, signals)
-            
-            if performance:
-                col_perf1, col_perf2, col_perf3 = st.columns(3)
-                col_perf1.metric("总收益率", f"{performance['total_return']:.2f}%")
-                col_perf2.metric("最终资产", f"${performance['final_value']:.2f}")
-                col_perf3.metric("交易次数", f"{performance['trades']}")
-                
-                # 绘制买卖信号
-                fig_backtest = go.Figure()
-                fig_backtest.add_trace(go.Scatter(x=df.index, y=df['Close'], name='股价', line=dict(color='gray', width=1)))
-                
-                buy_signals = signals[signals['Position'] == 1.0]
-                sell_signals = signals[signals['Position'] == -1.0]
-                
-                fig_backtest.add_trace(go.Scatter(x=buy_signals.index, y=df.loc[buy_signals.index]['Close'], 
-                                                mode='markers', name='买入信号', marker=dict(color='green', symbol='triangle-up', size=10)))
-                fig_backtest.add_trace(go.Scatter(x=sell_signals.index, y=df.loc[sell_signals.index]['Close'], 
-                                                mode='markers', name='卖出信号', marker=dict(color='red', symbol='triangle-down', size=10)))
-                                                
-                fig_backtest.update_layout(height=500, template="plotly_white", xaxis_rangeslider_visible=False)
-                st.plotly_chart(fig_backtest, use_container_width=True)
+            results = []
+            signals_dict = {}
+            for name, code in strategies.items():
+                sig = run_strategy(df, code)
+                if sig is not None:
+                    perf = calculate_strategy_performance(df, sig)
+                    if perf:
+                        results.append({
+                            '策略名称': name,
+                            '总收益率 (%)': f"{perf['total_return']:.2f}%",
+                            '最终资产': f"${perf['final_value']:.2f}",
+                            '交易次数': perf['trades']
+                        })
+                        signals_dict[name] = sig
+            if results:
+                st.table(pd.DataFrame(results))
+                st.divider()
+                col_sel1, col_sel2 = st.columns([1, 3])
+                with col_sel1:
+                    selected_strat = st.selectbox("选择要可视化的策略", list(strategies.keys()))
+                current_sig = signals_dict.get(selected_strat)
+                if current_sig is not None:
+                    buy_signals = current_sig[current_sig['Position'] == 1.0]
+                    sell_signals = current_sig[current_sig['Position'] == -1.0]
+                    fig_strat = go.Figure()
+                    fig_strat.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='股价'))
+                    if selected_strat == 'SMA金叉策略':
+                        fig_strat.add_trace(go.Scatter(x=df.index, y=df['SMA_20'], name='SMA 20', line=dict(color='orange', width=1)))
+                        fig_strat.add_trace(go.Scatter(x=df.index, y=df['SMA_50'], name='SMA 50', line=dict(color='blue', width=1)))
+                    elif selected_strat == '布林带突破':
+                         if 'BB_Upper' in df.columns:
+                            fig_strat.add_trace(go.Scatter(x=df.index, y=df['BB_Upper'], name='上轨', line=dict(color='gray', dash='dash')))
+                            fig_strat.add_trace(go.Scatter(x=df.index, y=df['BB_Lower'], name='下轨', line=dict(color='gray', dash='dash'), fill='tonexty'))
+                    fig_strat.add_trace(go.Scatter(x=buy_signals.index, y=df.loc[buy_signals.index]['Close'] * 0.98, mode='markers', marker=dict(symbol='triangle-up', color='#00CC96', size=15, line=dict(width=1, color='black')), name='买入信号'))
+                    fig_strat.add_trace(go.Scatter(x=sell_signals.index, y=df.loc[sell_signals.index]['Close'] * 1.02, mode='markers', marker=dict(symbol='triangle-down', color='#EF553B', size=15, line=dict(width=1, color='black')), name='卖出信号'))
+                    fig_strat.update_layout(height=600, title=f"{selected_strat} 买卖点展示", template="plotly_white", xaxis_rangeslider_visible=False)
+                    st.plotly_chart(fig_strat, use_container_width=True)
             else:
-                st.warning("策略回测失败")
+                st.warning("数据不足，无法计算策略表现。")
 
         with tab5:
             if options_data:
+                st.subheader(f"📊 期权情绪分析 (到期日: {options_data['expiration_date']}) [V3远期]")
                 col_opt1, col_opt2, col_opt3 = st.columns(3)
                 pcr = options_data['pcr']
                 col_opt1.metric("PCR", f"{pcr:.2f}")
