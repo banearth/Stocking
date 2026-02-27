@@ -40,7 +40,22 @@ st.title("📈 核心资产实战决策面板 [V3.1 宏观自适应版]")
 st.markdown("系统内置**状态机路由**与**动态防守脚本**，抛弃机械打分，专为趋势跟踪与长线波段定制定向策略。")
 
 st.sidebar.header("用户输入")
-ticker = st.sidebar.text_input("输入股票代码 (例如: AAPL, U, GLD)", "U").upper()
+
+st.sidebar.markdown("**港股示例：** 0700.HK (腾讯), 9988.HK (阿里), HSTECH.HK (恒生科技)")
+hk_presets = {
+    "无 (手动输入)": "",
+    "恒生科技 (HSTECH - 替代ETF:3033)": "3033.HK",
+    "恒生指数 (HSI)": "^HSI",
+    "腾讯控股 (0700)": "0700.HK",
+    "阿里巴巴 (9988)": "9988.HK",
+    "美团 (3690)": "3690.HK",
+    "小米 (1810)": "1810.HK"
+}
+selected_preset = st.sidebar.selectbox("快速选择港股", list(hk_presets.keys()))
+if hk_presets[selected_preset]:
+    ticker = hk_presets[selected_preset]
+else:
+    ticker = st.sidebar.text_input("输入股票代码 (例如: AAPL, U, GLD)", "U").upper()
 period_map = {
     "1个月": "1mo", "3个月": "3mo", "6个月": "6mo", 
     "1年": "1y", "2年": "2y", "5年": "5y", "最大": "max"
@@ -110,7 +125,11 @@ if ticker:
         
         col1.metric("当前价格", f"${current_price:.2f}", f"{change:.2f} ({pct_change:.2f}%)")
         if info:
-            col2.metric("总市值", f"${info.get('marketCap', 'N/A'):,}")
+            market_cap = info.get('marketCap')
+            if market_cap and isinstance(market_cap, (int, float)):
+                col2.metric("总市值", f"${market_cap:,.0f}")
+            else:
+                col2.metric("总市值", "N/A")
             # [V3] ETF 过滤显示
             if info.get('quoteType', 'EQUITY') == 'ETF':
                  col3.metric("市盈率 (PE)", "N/A (ETF)")

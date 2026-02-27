@@ -6,6 +6,18 @@ from datetime import datetime, timedelta
 
 def get_stock_data(ticker, period="1y", interval="1d"):
     try:
+        # 港股指数特殊处理：尝试用 download 方法获取更完整数据
+        if '.HK' in ticker or ticker.startswith('^HSI') or 'HSTECH' in ticker:
+            df = yf.download(ticker, period=period, interval=interval, progress=False)
+            if not df.empty:
+                df.index = df.index.tz_localize(None)
+                # MultiIndex 展平处理
+                if isinstance(df.columns, pd.MultiIndex):
+                    df = df.xs(ticker, axis=1, level=1) if ticker in df.columns.levels[1] else df.droplevel(1, axis=1)
+                info = None  # 指数没有 info
+                return df, info
+        
+        # 标准股票获取方式
         stock = yf.Ticker(ticker)
         df = stock.history(period=period, interval=interval)
         if df.empty:
@@ -184,8 +196,9 @@ def generate_tactical_panel(df, options_data=None, info=None):
     sma50 = df['SMA_50'].iloc[-1] if 'SMA_50' in df.columns and not pd.isna(df['SMA_50'].iloc[-1]) else support_level
 
     # 提取长短双期权情绪
-    pcr_short = options_data.get('pcr_short', 1.0) if options_data else 1.0
-    pcr_mid = options_data.get('pcr_mid', 1.0) if options_data else 1.0
+    has_options = options_data is not None
+    pcr_short = options_data.get('pcr_short', 1.0) if has_options else 1.0
+    pcr_mid = options_data.get('pcr_mid', 1.0) if has_options else 1.0
     
     rsi = df['RSI'].iloc[-1] if 'RSI' in df.columns else 50
     volume_surge = df['Volume'].iloc[-1] > df['Volume'].rolling(20).mean().iloc[-1] * 1.5
@@ -198,21 +211,24 @@ def generate_tactical_panel(df, options_data=None, info=None):
     }
 
     # [V3.1] 结构化情绪探针：对比长短期限错配
-    emotion_msg = f"📉短期PCR({pcr_short:.2f}) vs 📈中期PCR({pcr_mid:.2f})。 "
-    
-    # 阈值微调：放宽短期看涨判定(0.6->0.75)，捕捉更多潜在诱多信号
-    if pcr_short < 0.75 and pcr_mid > 1.0:
-        emotion_msg += "短期情绪偏向乐观，但中期资金在疯狂堆积空单防守，典型的【情绪诱多/反弹枯竭】，警惕主力高位出货。"
-    elif pcr_short > 1.2 and pcr_mid < 0.8:
-        emotion_msg += "短期市场恐慌抛售，中期资金暗中看涨，典型的【错杀挖坑】，适合在支撑位逢低吸纳。"
-    elif pcr_short < 0.7 and pcr_mid < 0.7:
-        emotion_msg += "长短资金一致狂热看涨，动能极强，但也需警惕『多头拥挤踩踏』风险。"
-    elif pcr_short > 1.0 and pcr_mid > 1.0:
-        emotion_msg += "长短资金一致看跌，悲观情绪蔓延，切勿盲目抄底接飞刀。"
-    elif pcr_mid > 2.0: # 新增：中期极度异常监控
-        emotion_msg += "⚠️注意：中期PCR出现极值，主力资金正在进行大规模对冲或避险，中期趋势存疑。"
+    if not has_options:
+        emotion_msg = "⚠️ 无法获取该标的的期权链数据，情绪侦测模块已自动降级为纯K线模式。"
     else:
-        emotion_msg += "期权期限结构稳定，未见极端情绪背离噪音。"
+        emotion_msg = f"📉短期PCR({pcr_short:.2f}) vs 📈中期PCR({pcr_mid:.2f})。 "
+        
+        # 阈值微调：放宽短期看涨判定(0.6->0.75)，捕捉更多潜在诱多信号
+        if pcr_short < 0.75 and pcr_mid > 1.0:
+            emotion_msg += "短期情绪偏向乐观，但中期资金在疯狂堆积空单防守，典型的【情绪诱多/反弹枯竭】，警惕主力高位出货。"
+        elif pcr_short > 1.2 and pcr_mid < 0.8:
+            emotion_msg += "短期市场恐慌抛售，中期资金暗中看涨，典型的【错杀挖坑】，适合在支撑位逢低吸纳。"
+        elif pcr_short < 0.7 and pcr_mid < 0.7:
+            emotion_msg += "长短资金一致狂热看涨，动能极强，但也需警惕『多头拥挤踩踏』风险。"
+        elif pcr_short > 1.0 and pcr_mid > 1.0:
+            emotion_msg += "长短资金一致看跌，悲观情绪蔓延，切勿盲目抄底接飞刀。"
+        elif pcr_mid > 2.0: # 新增：中期极度异常监控
+            emotion_msg += "⚠️注意：中期PCR出现极值，主力资金正在进行大规模对冲或避险，中期趋势存疑。"
+        else:
+            emotion_msg += "期权期限结构稳定，未见极端情绪背离噪音。"
         
     tactical_data['emotion'] = emotion_msg
 
